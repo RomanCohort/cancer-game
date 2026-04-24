@@ -98,7 +98,8 @@
 1.1
 
 ## 作者
-颜子壹（Yanzi1）
+
+[RomanCohort](https://github.com/RomanCohort)
 
 ## 许可证
 MIT
