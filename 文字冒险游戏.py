@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""抗癌文字冒险游戏 · v4
+"""抗癌文字冒险游戏 · v5
 
 v3 是"读起来像不像文字冒险"（器官描写、细胞性格、分级结局）。
-v4 把初代那套**人体地图 + 地形系统**找回来 —— 初代 9,321 行里有约 50 个身体
-区域、每个区域带地形类型（组织 / 血流 / 淋巴 / 屏障 / 免疫中心 / 微生物…），
-战斗会读地形。那个文件已经坏了（字符串没闭合，跑不起来），但设计是好的，
-所以照着它的思路重做一套能跑的：
+v4 把初代那套**人体地图 + 地形系统**找回来（约 50 个身体区域、每个带地形类型、
+战斗读地形）。
+v5 补上初代另外三套被丢掉的系统 —— 它们原本就在那个坏掉的文件里：
+  · **战斗**：癌不再只是一个数字，病灶会长出有血量的单位（原位克隆 / 浸润边缘 /
+    血管内渗灶 / 免疫逃逸株 / 循环肿瘤细胞），BOSS 也是真的单位，要打掉才退
+  · **技能**：6 个主动能力，各有抗体消耗与冷却（初代的 skill_cooldowns）
+  · **交易**：10 项的商店，能买也能回收（半价），抗体是唯一货币
+  · 外加任务：达成即结算抗体
+
+v4 那套地图与地形照旧：
 
   · 地图：全身一条循环路线 血液 → 骨髓 → 淋巴结 → 脾脏 → 肝脏 → 肠道 → 肺 → 回到血液
   · 地形：每个器官有自己的地形，**直接改战斗与增殖**（不是文案）
@@ -136,6 +142,57 @@ ROUTE = ["血液", "骨髓", "淋巴结", "脾脏", "肝脏", "肠道", "肺"]
 #: 地形适应：3 回合内地形加成翻倍、惩罚忽略（对应初代的 terrain_boost）
 TERRAIN_ADAPT_TURNS = 3
 
+# ── 技能（v5 补的那套）──────────────────────────────────────────────
+# 初代有 player_skills + skill_cooldowns；这里照同一个模型重做：
+#   cost  : 花多少抗体
+#   cd    : 冷却几回合
+#   kind  : 效果类型（在 cast() 里结算，全部改的是真数字）
+SKILLS = {
+    "靶向清除":   {"cost": 2, "cd": 3, "kind": "snipe",
+                   "desc": "对驻地敌人造成 9 点伤害（不打器官好感）"},
+    "哨兵部署":   {"cost": 1, "cd": 2, "kind": "garrison",
+                   "desc": "驻地好感 +6，并补充 1 支驻军"},
+    "细胞因子风暴": {"cost": 3, "cd": 5, "kind": "storm",
+                   "desc": "驻地癌 -7、好感 -5；全队攻击 +2（2 回合）"},
+    "免疫记忆":   {"cost": 2, "cd": 4, "kind": "memory",
+                   "desc": "全队攻击 +3（3 回合），对已见过的克隆更狠"},
+    "趋化因子":   {"cost": 1, "cd": 2, "kind": "chemotaxis",
+                   "desc": "把最脏区域的一部分敌人吸引到驻地，并就地削 3 点"},
+    "血管封锁":   {"cost": 2, "cd": 4, "kind": "blockade",
+                   "desc": "本回合全区域癌细胞不增殖，逃逸数归零"},
+}
+
+# ── 敌人（v5）：癌不再只是一个数字，病灶会长出有血量的单位 ──────────
+# name -> (血量, 攻击, 说明)。血量不是"癌值"：打掉一个单位会连带削掉一片病灶。
+ENEMIES = {
+    "原位克隆": (6, 2, "老老实实待着，边界清楚"),
+    "浸润边缘": (8, 3, "正在啃噬周围组织"),
+    "血管内渗灶": (7, 4, "挤进血管，来去快"),
+    "免疫逃逸株": (10, 3, "把标记藏起来了，常规攻击都变钝"),
+    "循环肿瘤细胞": (5, 5, "在血流里漂，打不死就还会回来"),
+}
+
+#: 一个敌人的"病灶负担"：它的血量 × 这个系数，就是清掉它削掉的癌值
+ENEMY_BURDEN = 1.8
+
+#: 商店：抗体换东西（原版那串药品表的可玩子集）
+SHOP = {
+    "化疗药物":         (2, "全场癌细胞 -6，器官好感 -2"),
+    "靶向药物":         (3, "指定器官癌细胞 -10"),
+    "免疫检查点抑制剂": (4, "全队攻击 +3（2 回合）"),
+    "放疗":             (3, "清除一个器官 60% 癌细胞，好感 -3"),
+    "BRCA-RNA疫苗":     (5, "本回合敌方停止增殖，缓解度 +1"),
+    "激素疗法":         (2, "BOSS 强度 -30%（3 回合）"),
+    "阿司匹林":         (1, "解除负面状态"),
+    "手术":             (5, "直接削掉一个器官 50% 癌细胞，好感 -5"),
+    "CAR-T疗法":        (6, "召唤一支顶级 T 细胞战队（攻12/血10）"),
+    "地形适应":         (2, "3 回合内地形加成翻倍、惩罚忽略"),
+}
+
+#: 回收价 = 标价的一半向下取整，最低 1。（有买有卖才叫交易）
+def _resale(price):
+    return max(1, price // 2)
+
 DRUGS = {
     "化疗药物":         (2, "对全场癌细胞造成 6 伤害，副作用：全器官好感-2", "chemo"),
     "靶向药物":         (3, "对指定器官造成 10 伤害", "targeted"),
@@ -159,6 +216,9 @@ BOSSES = [
     ("微转移灶", "它已经在别的器官里落了脚，只是还太小、没被发现。"),
     ("免疫逃逸克隆", "它学会了伪装，把自己的标记藏了起来。"),
 ]
+
+#: BOSS 也是真的敌人单位（v5），模糊测试里要认得出这些名字
+BOSS_NAMES = tuple(n for n, _ in BOSSES)
 
 
 def selftest_mode():
@@ -184,14 +244,22 @@ class Game:
         self.terrain_turns = 0
         self.at = ROUTE[0]                 # 部队当前驻扎的区域（地形战斗的地点）
         self.state_line = False            # --state：每回合多打一行给网页的 JSON
+        # v5：技能冷却 / 攻击增益 / 封锁回合 / 任务进度
+        self.skills_cd = {}
+        self.atk_buff = 0
+        self.atk_buff_turns = 0
+        self.blockade_turns = 0
+        self.kills = 0
+        self.quests = {"首杀": [0, 3], "净化": [0, 2], "稳住": [0, 5]}
+        self.quest_paid = []
         self.cells = [{"name": n, "atk": CELLS[n][1], "hp": CELLS[n][2]}
                       for n in ("T细胞", "巨噬细胞")]
         self.drugs = {"化疗药物": 1, "靶向药物": 1, "阿司匹林": 1}
-        self.quests = []
         self.rooms = {}
         for r in ROOMS:
             self.rooms[r] = {"favor": 80, "fall": 0, "cancer": 8,
-                             "garrison": self._make_garrison(r)}
+                             "garrison": self._make_garrison(r),
+                             "enemies": []}
 
     # ── 器官驻军：按器官偏好生成 ─────────────────────────────────────
     def _make_garrison(self, room):
@@ -210,7 +278,11 @@ class Game:
                 "boss_mult": self.boss_mult, "boss_count": self.boss_count,
                 "cells": self.cells, "drugs": self.drugs, "rooms": self.rooms,
                 "quests": self.quests, "at": self.at,
-                "terrain_turns": self.terrain_turns}
+                "terrain_turns": self.terrain_turns,
+                "skills_cd": self.skills_cd, "atk_buff": self.atk_buff,
+                "atk_buff_turns": self.atk_buff_turns,
+                "blockade_turns": self.blockade_turns, "kills": self.kills,
+                "quest_paid": self.quest_paid}
 
     def save(self, path):
         tmp = path + ".tmp"
@@ -228,11 +300,18 @@ class Game:
         g = cls(d.get("mode") or "20岁", seed=seed)
         for k in ("round", "lives", "antibody", "remission", "escaped",
                   "boss_mult", "boss_count", "cells", "drugs", "rooms", "quests",
-                  "at", "terrain_turns"):
+                  "at", "terrain_turns", "skills_cd", "atk_buff",
+                  "atk_buff_turns", "blockade_turns", "kills", "quest_paid"):
             if k in d:
                 setattr(g, k, d[k])
         if g.at not in TERRAIN:              # 老存档没有 at，或存了个不认识的区域
             g.at = ROUTE[0]
+        for r in ROOMS:                      # 老存档没有敌人字段
+            g.rooms.setdefault(r, {}).setdefault("enemies", [])
+        if not isinstance(g.quests, dict):   # v4 存档里 quests 是 list，v5 换成 dict
+            g.quests = {"首杀": [0, 3], "净化": [0, 2], "稳住": [0, 5]}
+        if not isinstance(g.quest_paid, list):
+            g.quest_paid = []
         return g
 
     # ── 输出 ─────────────────────────────────────────────────────────
@@ -249,13 +328,15 @@ class Game:
 
     def banner(self):
         self.say("=" * 58)
-        self.say("  抗癌文字冒险游戏 · 免疫系统指挥官（v4）")
+        self.say("  抗癌文字冒险游戏 · 免疫系统指挥官（v5）")
         self.say("=" * 58)
         self.say(f"  开局模式：{self.mode} —— {MODES[self.mode]['desc']}")
         self.say(f"  目标：缓解度 ≥ {MAX_VICTORY_POINTS}；生命 {self.lives} 条")
         self.say("  你是指挥官。你的部队是免疫细胞，你的战场是你自己。")
         self.say(f"  全身循环：{' → '.join(ROUTE)} → 回到血液")
         self.say("  地形会改战斗：驻地对了多吃伤害，站错了就是在陌生环境里硬拼。")
+        self.say(f"  技能 {len(SKILLS)} 个（9）、商店 {len(SHOP)} 项（10）；"
+                 f"病灶会长出有血量的敌人，打掉才算清干净。")
 
     def brief(self):
         """一行摘要：连续推进时用，避免刷屏。"""
@@ -272,6 +353,16 @@ class Game:
         t = TERRAIN[self.at]
         adapt = "（地形适应中）" if self.terrain_turns > 0 else ""
         self.say(f"  ▸ 部队驻扎：【{self.at}】地形「{t['name']}」{adapt}")
+        if self.atk_buff:
+            self.say(f"  ▸ 增益：全队攻击 +{self.atk_buff}（剩 {self.atk_buff_turns} 回合）")
+        line = getattr(self, "last_target", self.at)
+        foes = self.rooms[line]["enemies"]
+        if foes:
+            self.say("  ▸ 战线 %s：%s" % (line, "、".join(
+                "%s(%d血%s)" % (f["name"], max(0, f["hp"]), "/BOSS" if f.get("boss") else "")
+                for f in foes)))
+        else:
+            self.say("  ▸ 战线：%s（没有成形的敌人）" % line)
         # 每回合露一句场景描写：文字冒险的"画面感"
         self.say("  " + ROOM_DESC[self.at])
         for r in ROOMS:
@@ -290,9 +381,23 @@ class Game:
             "remission": self.remission, "escaped": self.escaped,
             "endless": self.endless, "at": self.at, "route": ROUTE,
             "terrain_turns": self.terrain_turns,
+            "front": getattr(self, "last_target", self.at),
+            "atk_buff": self.atk_buff, "blockade": self.blockade_turns,
+            "kills": self.kills,
+            "skills": {n: {"cost": s["cost"], "cd": s["cd"], "desc": s["desc"],
+                           "left": self.skills_cd.get(n, 0)}
+                       for n, s in SKILLS.items()},
+            "shop": {n: {"price": p, "desc": d, "sell": _resale(p),
+                         "owned": self.drugs.get(n, 0)}
+                     for n, (p, d) in SHOP.items()},
+            "quests": {k: {"done": v[0], "need": v[1], "paid": k in self.quest_paid}
+                       for k, v in self.quests.items()},
             "rooms": {r: {"favor": self.rooms[r]["favor"], "fall": self.rooms[r]["fall"],
                           "cancer": self.rooms[r]["cancer"],
                           "garrison": len(self.rooms[r]["garrison"]),
+                          "enemies": [{"name": e["name"], "hp": max(0, e["hp"]),
+                                       "atk": e["atk"], "boss": bool(e.get("boss"))}
+                                      for e in self.rooms[r]["enemies"]],
                           "terrain": TERRAIN[r]["name"],
                           "note": TERRAIN[r]["note"],
                           # 数值一起给出去：网页的地形表要显示"到底改了多少"，
@@ -326,7 +431,11 @@ class Game:
                 bonus += f"；增殖{'+' if t['growth'] > 0 else ''}{t['growth']}"
             mark = "●" if r == self.at else " "
             self.say(f"  {mark}{r:<5} {t['name']:<9} {d['favor']:>3}  {d['fall']:>3}%"
-                     f"  {d['cancer']:>3}  {len(d['garrison']):>2}    {bonus}")
+                     f"  {d['cancer']:>3}  {len(d['garrison']):>2}"
+                     f"  {'敌' + str(len(d['enemies'])) if d['enemies'] else '—':>3}  {bonus}")
+        self.say("\n   任务：%s" % "、".join(
+            "%s %d/%d%s" % (k, v[0], v[1], "✔" if k in self.quest_paid else "")
+            for k, v in self.quests.items()))
         self.say("=" * 58)
 
     def roster(self):
@@ -416,6 +525,7 @@ class Game:
         return b
 
     def battle(self):
+        self.last_target = self.front_line()
         bonus = 3 if self.checkpoint_turns > 0 else 0
         killed = 0
         # 目标选法沿用 v3：自动扑向癌细胞最多的器官（不然全身管不过来）。
@@ -427,13 +537,20 @@ class Game:
             if self.rooms[r]["cancer"] > worst:
                 worst, target = self.rooms[r]["cancer"], r
         if target is None or worst <= 0:
+            # 器官干净但可能有残留敌人：清掉它们，把一个区域真正"肃清"
+            for r in ROOMS:
+                if self.rooms[r]["enemies"]:
+                    target = r
+                    worst = self.rooms[r]["cancer"]
+                    break
+        if target is None or (worst <= 0 and not self.rooms[target]["enemies"]):
             # 全身干净：部队就地驻守，持续修复驻地（免疫存在感 = 器官好感）
             self.rooms[self.at]["favor"] = min(100, self.rooms[self.at]["favor"] + 1)
             return 0
         here = (target == self.at)
         d = self.rooms[target]
         for c in list(self.cells):
-            dmg = c["atk"] + bonus + (self.terrain_bonus(c["name"]) if here else 0)
+            dmg = c["atk"] + bonus + self.atk_buff + (self.terrain_bonus(c["name"]) if here else 0)
             if c["name"] == "树突细胞":
                 dmg += 1
             if c["name"] == "细胞因子":
@@ -444,15 +561,169 @@ class Game:
                         cap = CELLS[other["name"]][1] + 6
                         other["atk"] = min(other["atk"] + 2, cap)
                 self.rooms[target]["favor"] = min(100, self.rooms[target]["favor"] + 3)
-            d["cancer"] = max(0, d["cancer"] - dmg)
-            killed += dmg
+            if d["enemies"]:
+                # 有单位就先打单位：打掉一个单位会连带削掉它承载的那片病灶
+                foe = max(d["enemies"], key=lambda e: e["hp"])
+                foe["hp"] -= dmg
+                killed += dmg
+                if foe["hp"] <= 0:
+                    d["enemies"].remove(foe)
+                    d["cancer"] = max(0, d["cancer"] - foe.get("burden", 0))
+                    self.kills += 1
+                    self.say(f"     ✕ 消灭 {foe['name']}（驻地癌 -{foe.get('burden', 0)}）")
+            else:
+                d["cancer"] = max(0, d["cancer"] - dmg)
+                killed += dmg
             if c["name"] == "中性粒细胞":
                 self.cells.remove(c)
             elif c["name"] == "巨噬细胞" and c["hp"] < CELLS["巨噬细胞"][2]:
                 c["hp"] += 1
         return killed
 
+    # ── v5：前线 / 敌人 / 技能 / 商店 ────────────────────────────────
+    def front_line(self):
+        """当前战线：癌细胞最多的区域（和 battle() 的选法一致）。"""
+        best, name = -1, self.at
+        for r in ROOMS:
+            score = self.rooms[r]["cancer"] + len(self.rooms[r]["enemies"]) * 4
+            if score > best:
+                best, name = score, r
+        return name
+
+    def spawn_enemies(self, room):
+        """癌长到一定程度就会"长出单位"——不再是抽象数字。"""
+        d = self.rooms[room]
+        if d["cancer"] < 10 or len(d["enemies"]) >= 2:
+            return None
+        names = list(ENEMIES)
+        if d["cancer"] < 14:
+            pool = names[:2]
+        elif d["cancer"] < 20:
+            pool = names[1:4]
+        else:
+            pool = names[2:]
+        pick = self.rng.choice(pool)
+        hp, atk, desc = ENEMIES[pick]
+        hp = max(3, int(hp * (0.8 + 0.4 * self.diff)) + self.rng.randint(-1, 2))
+        d["enemies"].append({"name": pick, "hp": hp, "atk": atk, "desc": desc,
+                             "burden": int(ENEMY_BURDEN * ENEMIES[pick][0])})
+        return pick
+
+    def enemy_strike(self):
+        """敌人回合：战线上的敌人打部队；没被压制的区域敌人啃器官。"""
+        line = getattr(self, "last_target", self.at) or self.at
+        d = self.rooms[line]
+        for foe in d["enemies"]:
+            if not self.cells:
+                break
+            victim = self.rng.choice(self.cells)
+            victim["hp"] -= foe["atk"]
+            if victim["hp"] <= 0:
+                self.say(f"     {victim['name']} 被 {foe['name']} 打崩。")
+                self.cells.remove(victim)
+        for r in ROOMS:
+            if r == line:
+                continue
+            if self.rooms[r]["enemies"]:
+                self.rooms[r]["favor"] = max(0, self.rooms[r]["favor"] - 2)
+
+    def cast(self, name):
+        """放技能。（初代的 skill_cooldowns 就是这套：消耗 + 冷却。）"""
+        spec = SKILLS.get(name)
+        if not spec:
+            return "没有这个技能。可用：%s" % "、".join(SKILLS)
+        left = self.skills_cd.get(name, 0)
+        if left > 0:
+            return "%s 还在冷却（%d 回合）。" % (name, left)
+        if self.antibody < spec["cost"]:
+            return "抗体不够（%s 要 %d，现有 %d）。" % (name, spec["cost"], self.antibody)
+        self.antibody -= spec["cost"]
+        self.skills_cd[name] = spec["cd"]
+        line = getattr(self, "last_target", self.at) or self.at
+        d = self.rooms[line]
+        kind = spec["kind"]
+        if kind == "snipe":
+            if not d["enemies"]:
+                return "%s：战线（%s）上没有敌人，白放了一发。" % (name, line)
+            foe = max(d["enemies"], key=lambda e: e["hp"])
+            foe["hp"] -= 9
+            if foe["hp"] <= 0:
+                d["enemies"].remove(foe)
+                d["cancer"] = max(0, d["cancer"] - foe.get("burden", 0))
+                self.kills += 1
+                return "%s：%s 被一枪打掉。" % (name, foe["name"])
+            return "%s：%s 剩 %d 血。" % (name, foe["name"], foe["hp"])
+        if kind == "garrison":
+            self.rooms[self.at]["favor"] = min(100, self.rooms[self.at]["favor"] + 6)
+            self.rooms[self.at]["garrison"].append(
+                {"name": "中性粒细胞", "atk": CELLS["中性粒细胞"][1],
+                 "hp": CELLS["中性粒细胞"][2]})
+            return "%s：驻地 %s 好感 +6，补了 1 支驻军。" % (name, self.at)
+        if kind == "storm":
+            d["cancer"] = max(0, d["cancer"] - 7)
+            d["favor"] = max(0, d["favor"] - 5)
+            for foe in list(d["enemies"]):
+                foe["hp"] -= 3
+                if foe["hp"] <= 0:
+                    d["enemies"].remove(foe)
+                    self.kills += 1
+            self.atk_buff += 2
+            self.atk_buff_turns = max(self.atk_buff_turns, 2)
+            return "%s：%s 癌 -7、好感 -5，全队攻击 +2（2 回合）。" % (name, line)
+        if kind == "memory":
+            self.atk_buff += 3
+            self.atk_buff_turns = max(self.atk_buff_turns, 3)
+            return "%s：全队攻击 +3（3 回合）。" % name
+        if kind == "chemotaxis":
+            worst = max(ROOMS, key=lambda r: self.rooms[r]["cancer"])
+            moved = min(4, self.rooms[worst]["cancer"])
+            self.rooms[worst]["cancer"] -= moved
+            d["cancer"] += moved
+            d["cancer"] = max(0, d["cancer"] - 3)
+            return "%s：从 %s 引来 %d 点病灶，就地削掉 3。" % (name, worst, moved)
+        if kind == "blockade":
+            self.blockade_turns = 1
+            self.escaped = 0
+            return "%s：本回合全区域停止增殖，逃逸清零。" % name
+        return "%s：（没生效）" % name
+
+    def skill_view(self):
+        self.say("\n技能（9 使用；消耗抗体 + 冷却）：")
+        for n, s in SKILLS.items():
+            left = self.skills_cd.get(n, 0)
+            state = ("冷却 %d 回合" % left) if left > 0 else "可用"
+            self.say("  %-10s 抗体%-2d 冷却%-2d  %-22s [%s]"
+                     % (n, s["cost"], s["cd"], s["desc"], state))
+        if self.atk_buff:
+            self.say("  当前增益：全队攻击 +%d（剩 %d 回合）" % (self.atk_buff, self.atk_buff_turns))
+
+    def shop_view(self):
+        self.say("\n商店（10 购买 / 卖 出售；抗体 %d）：" % self.antibody)
+        for n, (price, desc) in SHOP.items():
+            self.say("  %-12s %2d 抗体   卖 %d    %s" % (n, price, _resale(price), desc))
+
+    def shop_buy(self, name):
+        if name not in SHOP:
+            return "商店里没有 %s。" % name
+        price = SHOP[name][0]
+        if self.antibody < price:
+            return "抗体不够（%s 要 %d，现有 %d）。" % (name, price, self.antibody)
+        self.antibody -= price
+        self.drugs[name] = self.drugs.get(name, 0) + 1
+        return "买下 %s（-%d 抗体），现有 %d 份。" % (name, price, self.drugs[name])
+
+    def shop_sell(self, name):
+        if self.drugs.get(name, 0) <= 0:
+            return "没有 %s 可卖。" % name
+        if name not in SHOP:
+            return "%s 不能回收。" % name
+        back = _resale(SHOP[name][0])
+        self.drugs[name] -= 1
+        self.antibody += back
+        return "卖掉 1 份 %s（+%d 抗体）。" % (name, back)
+
     def enemy_turn(self):
+        blocked = self.blockade_turns > 0
         for r in ROOMS:
             d = self.rooms[r]
             # 地形也会改增殖速度：肺（低氧）与肠道（菌群竞争）压住它，
@@ -460,7 +731,8 @@ class Game:
             growth = 1 + int(self.diff) + TERRAIN[r]["growth"]
             if d["favor"] < 40:
                 growth += 1
-            d["cancer"] += max(0, growth)
+            if not blocked:
+                d["cancer"] += max(0, growth)
             if d["favor"] >= 70:
                 d["cancer"] = max(0, d["cancer"] - 2)
             elif d["favor"] < 30 and d["garrison"]:
@@ -469,6 +741,12 @@ class Game:
             # 沦陷度上下都要封：只 min(100) 的话，当 癌=0 且 好感=100 时会算出
             # 负值（0 + (80-100) = -20），fuzz 就是这么抓出来的。
             d["fall"] = max(0, min(100, int(d["cancer"] * 1.5 + (80 - d["favor"]))))
+            # v5：病灶长到一定程度就会长出有血量的单位
+            if not blocked:
+                born = self.spawn_enemies(r)
+                if born:
+                    self.say("  ☣ %s 里出现 %s。" % (r, born))
+        self.enemy_strike()
         for r in ROOMS:
             if self.rooms[r]["fall"] >= 100:
                 self.escaped += self.rng.randint(1, 3)
@@ -478,8 +756,38 @@ class Game:
             self.hormone_turns -= 1
         if self.terrain_turns:
             self.terrain_turns -= 1
+        if self.blockade_turns:
+            self.blockade_turns -= 1
+        if self.atk_buff_turns:
+            self.atk_buff_turns -= 1
+            if self.atk_buff_turns == 0:
+                self.atk_buff = 0
+        for n in list(self.skills_cd):
+            if self.skills_cd[n] > 0:
+                self.skills_cd[n] -= 1
+                if self.skills_cd[n] <= 0:
+                    del self.skills_cd[n]
+        self.check_quests()
         if self.rng.random() < 0.25:
             self.say("  ⚠ 血栓事件：血流受阻，一处微循环被堵住了。")
+
+    def check_quests(self):
+        """任务：达成即结算抗体（对应初代的 任务/委托）。"""
+        clean = sum(1 for r in ROOMS
+                    if self.rooms[r]["cancer"] <= 2 and not self.rooms[r]["enemies"])
+        avg_fall = sum(r["fall"] for r in self.rooms.values()) / len(self.rooms)
+        rules = [("首杀", self.kills, 3, 4),
+                 ("净化", clean, 2, 6),
+                 ("稳住", self.round if avg_fall < 6 else 0, 5, 5)]
+        for name, value, need, reward in rules:
+            if name in self.quest_paid:
+                continue
+            prog = min(value, need)
+            self.quests[name] = [prog, need]
+            if value >= need:
+                self.quest_paid.append(name)
+                self.antibody += reward
+                self.say("  ✔ 任务完成：%s（+%d 抗体）" % (name, reward))
 
     def boss_turn(self):
         idx = min(self.boss_count, len(BOSSES) - 1)
@@ -488,6 +796,13 @@ class Game:
         mult = self.boss_mult * (0.7 if self.hormone_turns else 1.0)
         dmg = int(5 * mult * self.diff)
         self.say(f"  ☠ BOSS：{name} —— {desc}")
+        # v5：BOSS 是**一支真的单位**，会留在最脏的区域里挨打；打掉它才叫过关
+        worst = max(ROOMS, key=lambda r: self.rooms[r]["cancer"])
+        boss_hp = int(18 * mult)
+        self.rooms[worst]["enemies"].append(
+            {"name": name, "hp": boss_hp, "atk": max(2, int(3 * mult)), "desc": desc,
+             "boss": True, "burden": int(ENEMY_BURDEN * boss_hp)})
+        self.say(f"     {name} 已在 {worst} 落地（{boss_hp} 血）—— 打掉它才会退。")
         if self.cells:
             hit = max(1, len(self.cells) // 2)
             victims = self.rng.sample(self.cells, min(hit, len(self.cells)))
@@ -598,7 +913,8 @@ class Game:
             return scripted.pop(0)
         self.say("\n可选行动： 1招募  2用药  3推进回合（可写「3 5」连续 5 回合）"
                  "  4查看战队  5结束\n"
-                 "           6前进（驻扎到下一个区域）  7人体地图  8地形")
+                 "           6前进（驻扎到下一个区域）  7人体地图  8地形\n"
+                 "           9技能  10商店")
         return self._read("> ").strip().lower()
 
     def play(self, scripted=None, save_path=None):
@@ -651,6 +967,23 @@ class Game:
                 self.say(f"  增殖修正：{t['growth']:+d}/回合")
                 self.say("  地形加成只在**部队驻扎在这个区域**时生效 —— "
                          "先「6前进」过来，再推进回合。")
+                continue
+            if choice in ("9", "技能", "skill"):
+                self.skill_view()
+                sname = (scripted.pop(0) if scripted else self._read("用哪个技能？(回车=不用)")).strip()
+                if sname:
+                    self.say("  " + self.cast(sname))
+                continue
+            if choice in ("10", "商店", "shop"):
+                self.shop_view()
+                act = (scripted.pop(0) if scripted else
+                       self._read("买/卖/回车=离开？")).strip()
+                if act in ("买", "buy", "b"):
+                    iname = (scripted.pop(0) if scripted else self._read("买什么？")).strip()
+                    self.say("  " + self.shop_buy(iname))
+                elif act in ("卖", "sell", "s"):
+                    iname = (scripted.pop(0) if scripted else self._read("卖什么？")).strip()
+                    self.say("  " + self.shop_sell(iname))
                 continue
             # 推进回合；支持「3 5」/「c5」连续推进
             parts = choice.replace("×", " ").replace("x", " ").replace("c", "3 ").split()
@@ -720,6 +1053,63 @@ def run_selftest():
         assert k in st, "状态行缺字段 %s" % k
     assert set(st["rooms"]) == set(ROOMS)
 
+    # ── v5：技能 / 商店 / 敌人 / 任务的断言（都要真改数字，不是文案）───
+    gs = Game("20岁", seed=21)
+    gs.antibody = 20
+    base_atk = gs.atk_buff
+    msg = gs.cast("免疫记忆")
+    assert gs.atk_buff == base_atk + 3 and gs.atk_buff_turns == 3, \
+        "免疫记忆必须真的加攻击：%r" % msg
+    assert gs.antibody == 18, "技能必须扣抗体"
+    assert gs.skills_cd.get("免疫记忆") == SKILLS["免疫记忆"]["cd"], "技能必须进冷却"
+    again = gs.cast("免疫记忆")
+    assert "冷却" in again, "冷却中不该再放：%r" % again
+    poor = Game("20岁", seed=21)
+    poor.antibody = 0
+    assert "抗体不够" in poor.cast("免疫记忆"), "抗体不够要拒绝"
+    assert poor.skills_cd.get("免疫记忆") is None, "拒绝时不该进冷却"
+    # 商店：买要扣抗体、加库存；卖要半价回收、减库存
+    gp = Game("20岁", seed=22)
+    gp.antibody = 10
+    before = gp.drugs.get("手术", 0)
+    gp.shop_buy("手术")
+    assert gp.antibody == 5 and gp.drugs["手术"] == before + 1, "购买没生效"
+    gp.shop_sell("手术")
+    assert gp.antibody == 5 + _resale(SHOP["手术"][0]), "回收没生效"
+    assert gp.drugs["手术"] == before, "回收没减库存"
+    gp.antibody = 1                      # CAR-T 要 6，1 肯定不够
+    owned_before = gp.drugs.get("CAR-T疗法", 0)
+    assert "抗体不够" in gp.shop_buy("CAR-T疗法"), "缺钱时应当拒绝"
+    assert gp.antibody == 1 and gp.drugs.get("CAR-T疗法", 0) == owned_before, \
+        "拒绝时不能扣钱、也不能给东西"
+    # 敌人：病灶长到阈值会长出单位，战斗打的是单位，敌人会反击部队
+    ge = Game("20岁", seed=23)
+    ge.rooms["肺"]["cancer"] = 30
+    born = ge.spawn_enemies("肺")
+    assert born and ge.rooms["肺"]["enemies"], "癌到阈值应当长出敌人"
+    foe = ge.rooms["肺"]["enemies"][0]
+    foe["hp"] = 40                   # 拉高血量：要保证它挨完一轮还在，才测得到反击
+    hp0, n0 = foe["hp"], len(ge.rooms["肺"]["enemies"])
+    ge.last_target = "肺"
+    ge.battle()
+    after = ge.rooms["肺"]["enemies"]
+    assert (len(after) < n0) or (after and after[0]["hp"] < hp0), \
+        "战斗必须打掉敌人的血（现在还是 %r）" % after
+    cells_before = len(ge.cells)
+    hp_sum = sum(c["hp"] for c in ge.cells)
+    ge.enemy_strike()
+    assert len(ge.cells) < cells_before or sum(c["hp"] for c in ge.cells) < hp_sum, \
+        "敌人必须真的反击部队"
+    # 任务：达成后必须结算抗体，且只结算一次
+    gq = Game("20岁", seed=24)
+    gq.kills = 3
+    gq.antibody = 0
+    gq.check_quests()
+    first = gq.antibody
+    assert first > 0 and "首杀" in gq.quest_paid, "任务达成应当结算抗体"
+    gq.check_quests()
+    assert gq.antibody == first, "同一任务不能重复结算"
+
     g2 = Game("晚期", seed=7)
     g2.antibody = 12
     msg = g2.recruit("T细胞")
@@ -759,6 +1149,10 @@ def run_fuzz(times=50):
     actions = ["1", "2", "3", "3 5", "4", "5", "", "??", "1", "2"]
     # v4 新动作也要进模糊测试：前进/地图/地形不该把状态打坏
     actions += ["6", "7", "8", "前进", "地图", "地形"]
+    # v5 的技能与商店也要进：它们会改 antibody / cd / 库存
+    actions += ["9", "10", "技能", "商店"]
+    skills = list(SKILLS)
+    shop = list(SHOP)
     cells = list(CELLS)
     drugs = list(DRUGS)
     bad = 0
@@ -780,6 +1174,15 @@ def run_fuzz(times=50):
                     g.map_view()
                 elif a == "8":
                     assert TERRAIN[g.at]["note"]
+                elif a in ("9", "技能"):
+                    g.antibody += 3
+                    g.cast(random.choice(skills))
+                elif a in ("10", "商店"):
+                    g.antibody += 4
+                    it = random.choice(shop)
+                    g.shop_buy(it)
+                    if g.drugs.get(it, 0) > 0:
+                        g.shop_sell(it)
                 elif a.startswith("3"):
                     if g.tick() != "ok":
                         break
@@ -789,6 +1192,15 @@ def run_fuzz(times=50):
                 assert 0 <= g.lives <= START_LIVES
                 assert g.at in TERRAIN, "驻扎点必须始终是已知区域"
                 assert g.terrain_turns >= 0
+                assert g.atk_buff >= 0 and g.atk_buff_turns >= 0
+                assert g.kills >= 0
+                for name, cd in g.skills_cd.items():
+                    assert name in SKILLS and 0 <= cd <= SKILLS[name]["cd"], "冷却越界"
+                for r in g.rooms.values():
+                    assert isinstance(r["enemies"], list), "敌人字段必须是表"
+                    for e in r["enemies"]:
+                        assert e["name"] in BOSS_NAMES or e["name"] in ENEMIES, \
+                            "出现了不认识的敌人：%s" % e["name"]
                 for r in g.rooms.values():
                     assert 0 <= r["favor"] <= 100, "好感越界"
                     assert 0 <= r["fall"] <= 100, "沦陷越界"
