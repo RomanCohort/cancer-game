@@ -1,16 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""抗癌文字冒险游戏 · v3
+"""抗癌文字冒险游戏 · v4
 
-v2 修好了机制（资源分家 / 器官好感进主循环 / BOSS 比例封顶），v3 补的是
-"它读起来像不像一个文字冒险"：器官描写、细胞性格、分级结局；
-以及上站前的工程护栏：连续推进、存档续玩、模糊测试。
+v3 是"读起来像不像文字冒险"（器官描写、细胞性格、分级结局）。
+v4 把初代那套**人体地图 + 地形系统**找回来 —— 初代 9,321 行里有约 50 个身体
+区域、每个区域带地形类型（组织 / 血流 / 淋巴 / 屏障 / 免疫中心 / 微生物…），
+战斗会读地形。那个文件已经坏了（字符串没闭合，跑不起来），但设计是好的，
+所以照着它的思路重做一套能跑的：
+
+  · 地图：全身一条循环路线 血液 → 骨髓 → 淋巴结 → 脾脏 → 肝脏 → 肠道 → 肺 → 回到血液
+  · 地形：每个器官有自己的地形，**直接改战斗与增殖**（不是文案）
+  · 前进：把部队驻扎到下一个区域；驻扎在干净区域会持续修复它（好感 +1/回合）
+  · 地形适应：3 回合内地形加成翻倍、惩罚忽略
 
 纯标准库。命令行：
     python 文字冒险游戏.py                     正常玩
     python 文字冒险游戏.py --selftest          确定性自检（退出码 0 = 通过）
     python 文字冒险游戏.py --fuzz 50           50 局随机输入，只断言不崩
     python 文字冒险游戏.py --load save.json    从存档继续（--save 指定写入位置）
+    python 文字冒险游戏.py --state             每回合多打一行 @@STATE {...}@@
+                                               （网页侧靠它画人体地图，人不用看）
 """
 
 import argparse
@@ -70,6 +79,63 @@ ROOM_PREFERENCE = {
     "肠道": ["T细胞", "巨噬细胞", "细胞因子"],
 }
 
+# ── 地形系统（v4 找回的那套）─────────────────────────────────────────
+# 每个器官是一种"地形"：它改的是**数字**，不是文案。
+#   bonus : 该地形下每个细胞种类的攻击修正（没有条目 = 0）
+#   growth: 该地形每回合额外的癌细胞增殖（可以为负 —— 缺氧/菌群竞争会压住它）
+#   note  : 给玩家看的因果说明，必须和 bonus/growth 对得上，不许写成气氛词
+TERRAIN = {
+    "骨髓": {
+        "name": "造血基质",
+        "bonus": {"T细胞": 2, "B细胞": 2, "中性粒细胞": -1},
+        "growth": 0,
+        "note": "新兵在这里出生：T/B 细胞攻击 +2；中性粒细胞还没成熟，-1。",
+    },
+    "淋巴结": {
+        "name": "淋巴管网",
+        "bonus": {"树突细胞": 2, "T细胞": 1, "B细胞": 1},
+        "growth": 0,
+        "note": "情报中枢：标记细胞 +2，淋巴系 +1；地形本身不助长肿瘤。",
+    },
+    "脾脏": {
+        "name": "滤血窦",
+        "bonus": {"巨噬细胞": 2, "NK细胞": 2, "中性粒细胞": -1},
+        "growth": 1,
+        "note": "滤血场：吞噬与杀伤 +2；但肿瘤碎片随血汇集，增殖 +1。",
+    },
+    "肝脏": {
+        "name": "代谢小叶",
+        "bonus": {"巨噬细胞": 1, "中性粒细胞": 1},
+        "growth": 0,
+        "note": "解毒厂：库普弗细胞（巨噬系）稳定 +1。",
+    },
+    "肺": {
+        "name": "气血屏障",
+        "bonus": {"NK细胞": 1, "巨噬细胞": 1},
+        "growth": -1,
+        "note": "薄壁低氧：缺氧细胞分裂更慢，增殖 -1；杀伤细胞 +1。",
+    },
+    "血液": {
+        "name": "血流剪切",
+        "bonus": {"中性粒细胞": 2, "NK细胞": 1, "巨噬细胞": -1, "T细胞": -1},
+        "growth": 1,
+        "note": "高速血流：滚动迁移的中性粒细胞 +2；贴壁作战的巨噬/T 细胞 -1；"
+                "循环肿瘤细胞增殖 +1。",
+    },
+    "肠道": {
+        "name": "黏膜菌群",
+        "bonus": {"T细胞": 1, "细胞因子": 1},
+        "growth": -1,
+        "note": "几万亿邻居：菌群竞争压住增殖 -1；黏膜免疫 T 细胞与信号细胞 +1。",
+    },
+}
+
+#: 全身循环路线：前进就是沿着这条线走，走到头回到血液。
+ROUTE = ["血液", "骨髓", "淋巴结", "脾脏", "肝脏", "肠道", "肺"]
+
+#: 地形适应：3 回合内地形加成翻倍、惩罚忽略（对应初代的 terrain_boost）
+TERRAIN_ADAPT_TURNS = 3
+
 DRUGS = {
     "化疗药物":         (2, "对全场癌细胞造成 6 伤害，副作用：全器官好感-2", "chemo"),
     "靶向药物":         (3, "对指定器官造成 10 伤害", "targeted"),
@@ -80,6 +146,8 @@ DRUGS = {
     "激素疗法":         (2, "降低全局 BOSS 强度 30%", "hormone"),
     "阿司匹林":         (1, "解除当前负面状态", "aspirin"),
     "手术":             (5, "直接削减一个器官 50% 癌细胞，好感-5", "surgery"),
+    "地形适应":         (2, "3 回合内地形加成翻倍、惩罚忽略（在不利地形里作战时用）",
+                         "terrain_adapt"),
 }
 
 # BOSS 按出现次数换名字与描述 —— "每个阶段有张脸"
@@ -113,6 +181,9 @@ class Game:
         self.boss_count = 0
         self.hormone_turns = 0
         self.checkpoint_turns = 0
+        self.terrain_turns = 0
+        self.at = ROUTE[0]                 # 部队当前驻扎的区域（地形战斗的地点）
+        self.state_line = False            # --state：每回合多打一行给网页的 JSON
         self.cells = [{"name": n, "atk": CELLS[n][1], "hp": CELLS[n][2]}
                       for n in ("T细胞", "巨噬细胞")]
         self.drugs = {"化疗药物": 1, "靶向药物": 1, "阿司匹林": 1}
@@ -138,7 +209,8 @@ class Game:
                 "remission": self.remission, "escaped": self.escaped,
                 "boss_mult": self.boss_mult, "boss_count": self.boss_count,
                 "cells": self.cells, "drugs": self.drugs, "rooms": self.rooms,
-                "quests": self.quests}
+                "quests": self.quests, "at": self.at,
+                "terrain_turns": self.terrain_turns}
 
     def save(self, path):
         tmp = path + ".tmp"
@@ -155,22 +227,35 @@ class Game:
             raise ValueError("存档版本不匹配")
         g = cls(d.get("mode") or "20岁", seed=seed)
         for k in ("round", "lives", "antibody", "remission", "escaped",
-                  "boss_mult", "boss_count", "cells", "drugs", "rooms", "quests"):
+                  "boss_mult", "boss_count", "cells", "drugs", "rooms", "quests",
+                  "at", "terrain_turns"):
             if k in d:
                 setattr(g, k, d[k])
+        if g.at not in TERRAIN:              # 老存档没有 at，或存了个不认识的区域
+            g.at = ROUTE[0]
         return g
 
     # ── 输出 ─────────────────────────────────────────────────────────
     def say(self, text=""):
-        print(text, flush=True)
+        # Windows 控制台默认是 GBK，某些符号（●、⚠、emoji）编不出来会直接
+        # UnicodeEncodeError 把整局打断 —— 原版 9,321 行那个文件就是这么坏的
+        # 一路（emoji 写死在 print 里）。这里兜一层：编不出来就替换掉，不崩。
+        try:
+            print(text, flush=True)
+        except UnicodeEncodeError:
+            enc = getattr(sys.stdout, "encoding", None) or "ascii"
+            safe = text.encode(enc, "replace").decode(enc, "replace")
+            print(safe, flush=True)
 
     def banner(self):
         self.say("=" * 58)
-        self.say("  抗癌文字冒险游戏 · 免疫系统指挥官（v3）")
+        self.say("  抗癌文字冒险游戏 · 免疫系统指挥官（v4）")
         self.say("=" * 58)
         self.say(f"  开局模式：{self.mode} —— {MODES[self.mode]['desc']}")
         self.say(f"  目标：缓解度 ≥ {MAX_VICTORY_POINTS}；生命 {self.lives} 条")
         self.say("  你是指挥官。你的部队是免疫细胞，你的战场是你自己。")
+        self.say(f"  全身循环：{' → '.join(ROUTE)} → 回到血液")
+        self.say("  地形会改战斗：驻地对了多吃伤害，站错了就是在陌生环境里硬拼。")
 
     def brief(self):
         """一行摘要：连续推进时用，避免刷屏。"""
@@ -184,13 +269,65 @@ class Game:
         self.say(f"\n【第 {self.round} 回合】生命{self.lives}  抗体{self.antibody}"
                  f"  缓解度{self.remission}/{MAX_VICTORY_POINTS}"
                  f"  逃逸{self.escaped}  平均沦陷{avg_fall:.0f}%  部队{len(self.cells)}")
+        t = TERRAIN[self.at]
+        adapt = "（地形适应中）" if self.terrain_turns > 0 else ""
+        self.say(f"  ▸ 部队驻扎：【{self.at}】地形「{t['name']}」{adapt}")
         # 每回合露一句场景描写：文字冒险的"画面感"
-        self.say("  " + ROOM_DESC[self.rng.choice(ROOMS)])
+        self.say("  " + ROOM_DESC[self.at])
         for r in ROOMS:
             d = self.rooms[r]
             bar = "#" * int(d["cancer"] / 2) + "." * (10 - int(d["cancer"] / 2))
-            self.say(f"  {r:<5} 好感{d['favor']:>3} 沦陷{d['fall']:>3}% "
+            mark = "●" if r == self.at else " "
+            self.say(f" {mark}{r:<5} 好感{d['favor']:>3} 沦陷{d['fall']:>3}% "
                      f"癌{d['cancer']:>3} [{bar}] 驻军{len(d['garrison'])}")
+        if self.state_line:
+            self.say("@@STATE " + self.state_json() + "@@")
+
+    def state_json(self):
+        """给网页画人体地图用的一行 JSON（只有 --state 才会打，人玩的时候不打扰）。"""
+        return json.dumps({
+            "round": self.round, "lives": self.lives, "antibody": self.antibody,
+            "remission": self.remission, "escaped": self.escaped,
+            "endless": self.endless, "at": self.at, "route": ROUTE,
+            "terrain_turns": self.terrain_turns,
+            "rooms": {r: {"favor": self.rooms[r]["favor"], "fall": self.rooms[r]["fall"],
+                          "cancer": self.rooms[r]["cancer"],
+                          "garrison": len(self.rooms[r]["garrison"]),
+                          "terrain": TERRAIN[r]["name"],
+                          "note": TERRAIN[r]["note"],
+                          # 数值一起给出去：网页的地形表要显示"到底改了多少"，
+                          # 让前端自己再写一份 bonus 表迟早和游戏漂开。
+                          "bonus": TERRAIN[r]["bonus"],
+                          "growth": TERRAIN[r]["growth"]} for r in ROOMS},
+            "cells": [{"name": c["name"], "atk": c["atk"], "hp": c["hp"]}
+                      for c in self.cells],
+        }, ensure_ascii=False)
+
+    def map_view(self):
+        """人体地图：路线 + 驻扎点 + 每个区域的地形与状态，一次看全。"""
+        self.say("\n" + "=" * 58)
+        self.say("  人体地图 · 全身循环（前进 = 沿这条线走）")
+        self.say("=" * 58)
+        line1, line2 = [], []
+        for i, r in enumerate(ROUTE):
+            mark = "●" if r == self.at else "○"
+            line1.append(f"{mark}{i + 1}.{r}")
+        self.say("   " + " ── ".join(line1))
+        self.say("   └──────────── 回到血液（循环）────────────┘")
+        self.say(f"\n   现在驻扎：{self.at} · 地形「{TERRAIN[self.at]['name']}」")
+        self.say(f"   {TERRAIN[self.at]['note']}")
+        self.say("\n   区域      地形        好感 沦陷   癌  驻军  地形效果（攻击修正）")
+        for r in ROUTE:
+            d = self.rooms[r]
+            t = TERRAIN[r]
+            bonus = "、".join(f"{k}{'+' if v > 0 else ''}{v}"
+                             for k, v in t["bonus"].items()) or "无"
+            if t["growth"]:
+                bonus += f"；增殖{'+' if t['growth'] > 0 else ''}{t['growth']}"
+            mark = "●" if r == self.at else " "
+            self.say(f"  {mark}{r:<5} {t['name']:<9} {d['favor']:>3}  {d['fall']:>3}%"
+                     f"  {d['cancer']:>3}  {len(d['garrison']):>2}    {bonus}")
+        self.say("=" * 58)
 
     def roster(self):
         if not self.cells:
@@ -262,21 +399,41 @@ class Game:
             d["cancer"] -= cut
             d["favor"] = max(20, d["favor"] - 5)
             return f"手术：{room} 癌细胞 -{cut}（切掉了病灶，也切掉了一部分功能）。"
+        if eff == "terrain_adapt":
+            self.terrain_turns = TERRAIN_ADAPT_TURNS
+            t = TERRAIN[self.at]
+            return (f"地形适应：部队换上了适合「{t['name']}」的作战方式"
+                    f"（加成翻倍、惩罚忽略，{TERRAIN_ADAPT_TURNS} 回合）。")
         return "（没生效）"
 
     # ── 结算 ─────────────────────────────────────────────────────────
+    def terrain_bonus(self, cell_name):
+        """地形对某个细胞种类的攻击修正（含「地形适应」的翻倍/免疫惩罚）。"""
+        b = TERRAIN[self.at]["bonus"].get(cell_name, 0)
+        if self.terrain_turns > 0:
+            # 适应：正加成翻倍，负加成清零 —— 这是花 2 抗体买来的东西
+            return b * 2 if b > 0 else 0
+        return b
+
     def battle(self):
         bonus = 3 if self.checkpoint_turns > 0 else 0
         killed = 0
+        # 目标选法沿用 v3：自动扑向癌细胞最多的器官（不然全身管不过来）。
+        # 差别在于**地形加成只在你驻扎在那个器官时才吃得到** —— 于是「前进」成了
+        # 真的战术动作：提前把部队预置到战场，才能站在合手的地形里打；
+        # 站在别处打，就是在陌生地形里硬拼（没有任何加成，还可能吃不到细胞特性）。
+        target, worst = None, -1
+        for r in ROOMS:
+            if self.rooms[r]["cancer"] > worst:
+                worst, target = self.rooms[r]["cancer"], r
+        if target is None or worst <= 0:
+            # 全身干净：部队就地驻守，持续修复驻地（免疫存在感 = 器官好感）
+            self.rooms[self.at]["favor"] = min(100, self.rooms[self.at]["favor"] + 1)
+            return 0
+        here = (target == self.at)
+        d = self.rooms[target]
         for c in list(self.cells):
-            target = None
-            for r in ROOMS:
-                if self.rooms[r]["cancer"] > 0:
-                    target = r
-                    break
-            if target is None:
-                break
-            dmg = c["atk"] + bonus
+            dmg = c["atk"] + bonus + (self.terrain_bonus(c["name"]) if here else 0)
             if c["name"] == "树突细胞":
                 dmg += 1
             if c["name"] == "细胞因子":
@@ -287,7 +444,6 @@ class Game:
                         cap = CELLS[other["name"]][1] + 6
                         other["atk"] = min(other["atk"] + 2, cap)
                 self.rooms[target]["favor"] = min(100, self.rooms[target]["favor"] + 3)
-            d = self.rooms[target]
             d["cancer"] = max(0, d["cancer"] - dmg)
             killed += dmg
             if c["name"] == "中性粒细胞":
@@ -299,10 +455,12 @@ class Game:
     def enemy_turn(self):
         for r in ROOMS:
             d = self.rooms[r]
-            growth = 1 + int(self.diff)
+            # 地形也会改增殖速度：肺（低氧）与肠道（菌群竞争）压住它，
+            # 血液（循环肿瘤细胞）与脾脏（滤血汇集碎片）助长它。
+            growth = 1 + int(self.diff) + TERRAIN[r]["growth"]
             if d["favor"] < 40:
                 growth += 1
-            d["cancer"] += growth
+            d["cancer"] += max(0, growth)
             if d["favor"] >= 70:
                 d["cancer"] = max(0, d["cancer"] - 2)
             elif d["favor"] < 30 and d["garrison"]:
@@ -318,6 +476,8 @@ class Game:
             self.checkpoint_turns -= 1
         if self.hormone_turns:
             self.hormone_turns -= 1
+        if self.terrain_turns:
+            self.terrain_turns -= 1
         if self.rng.random() < 0.25:
             self.say("  ⚠ 血栓事件：血流受阻，一处微循环被堵住了。")
 
@@ -437,7 +597,8 @@ class Game:
         if scripted:
             return scripted.pop(0)
         self.say("\n可选行动： 1招募  2用药  3推进回合（可写「3 5」连续 5 回合）"
-                 "  4查看战队  5结束")
+                 "  4查看战队  5结束\n"
+                 "           6前进（驻扎到下一个区域）  7人体地图  8地形")
         return self._read("> ").strip().lower()
 
     def play(self, scripted=None, save_path=None):
@@ -469,6 +630,28 @@ class Game:
                 self.say("我的战队：")
                 self.roster()
                 continue
+            if choice in ("6", "前进", "m", "move"):
+                i = ROUTE.index(self.at)
+                self.at = ROUTE[(i + 1) % len(ROUTE)]
+                t = TERRAIN[self.at]
+                self.say(f"  前进：部队进入【{self.at}】。地形「{t['name']}」"
+                         f"（{t['note']}）")
+                self.say("  " + ROOM_DESC[self.at])
+                continue
+            if choice in ("7", "地图", "map"):
+                self.map_view()
+                continue
+            if choice in ("8", "地形", "terrain"):
+                t = TERRAIN[self.at]
+                self.say(f"  当前地形：{self.at} · {t['name']}")
+                self.say(f"  {t['note']}")
+                bonus = "、".join(f"{k} {'+' if v > 0 else ''}{v}"
+                                 for k, v in t["bonus"].items()) or "（无修正）"
+                self.say(f"  攻击修正：{bonus}")
+                self.say(f"  增殖修正：{t['growth']:+d}/回合")
+                self.say("  地形加成只在**部队驻扎在这个区域**时生效 —— "
+                         "先「6前进」过来，再推进回合。")
+                continue
             # 推进回合；支持「3 5」/「c5」连续推进
             parts = choice.replace("×", " ").replace("x", " ").replace("c", "3 ").split()
             rounds = 1
@@ -493,14 +676,49 @@ def run_selftest():
     """确定性流程：跑一条固定剧本 + 断言纯逻辑分支（不依赖人输入）。"""
     print("[selftest] 固定种子跑一遍确定性流程")
     g = Game("20岁", seed=20261013)
-    scripted = ["4", "1", "T细胞", "2", "化疗药物", "肝脏",
+    scripted = ["4", "7", "6", "8", "1", "T细胞", "2", "化疗药物", "肝脏",
                 "3 5",                      # 连续推进 5 回合（会撞上 BOSS）
-                "1", "巨噬细胞", "2", "BRCA-RNA疫苗", "脾脏",
-                "3 5", "5"]
+                "1", "巨噬细胞", "2", "BRCA-RNA疫苗", "脾脏", "6",
+                "3 5", "2", "地形适应", "肺", "3 5", "5"]
     with contextlib.redirect_stdout(io.StringIO()):
         result = g.play(scripted=scripted)
     print(f"[selftest] 剧本结果={result} 回合={g.round} 抗体={g.antibody} "
           f"缓解度={g.remission} 生命={g.lives} 部队={len(g.cells)}")
+
+    # ── 地形系统的断言：加成必须真的进战斗，而不是只有文案 ──────────────
+    assert set(TERRAIN) == set(ROOMS), "每个器官都要有地形"
+    assert len(ROUTE) == len(ROOMS) and set(ROUTE) == set(ROOMS), "路线要覆盖全部器官"
+    # 同样一局、同样一批细胞、同样一个目标，**只差驻扎点**：
+    # 驻扎在战场 vs 驻扎在别处，伤害必须不同 —— 否则地形只是文字。
+    target = "骨髓"                          # 先手部队是 T细胞+巨噬细胞，骨髓给 T细胞 +2
+    gauge_a, gauge_b = Game("20岁", seed=11), Game("20岁", seed=11)
+    for g in (gauge_a, gauge_b):
+        for r in ROOMS:
+            g.rooms[r]["cancer"] = 60 if r == target else 0
+    gauge_a.at = target                      # 驻扎在战场：吃地形
+    gauge_b.at = ROUTE[(ROUTE.index(target) + 1) % len(ROUTE)]   # 驻扎在别处：不吃
+    hit_here = gauge_a.battle()
+    hit_elsewhere = gauge_b.battle()
+    assert hit_here != hit_elsewhere, \
+        "驻扎点不同，伤害必须不同（地形要么真的生效，要么这套系统是假的）"
+    assert hit_here > hit_elsewhere, \
+        "站在合适的地形里应当打得更狠（骨髓给 T 细胞 +2）"
+    # 地形适应：加成翻倍、惩罚清零
+    ga2 = Game("20岁", seed=3)
+    ga2.at = "血液"
+    before = ga2.terrain_bonus("中性粒细胞")
+    ga2.terrain_turns = TERRAIN_ADAPT_TURNS
+    assert ga2.terrain_bonus("中性粒细胞") == before * 2, "地形适应应当让正加成翻倍"
+    assert ga2.terrain_bonus("巨噬细胞") == 0, "地形适应应当忽略负加成"
+    ga2.drugs["地形适应"] = 1
+    ga2.antibody = 10
+    ga2.use_drug("地形适应")
+    assert ga2.terrain_turns == TERRAIN_ADAPT_TURNS, "用药后应当进入地形适应"
+    # @@STATE 行必须是合法 JSON 且字段齐全
+    st = json.loads(ga2.state_json())
+    for k in ("round", "lives", "antibody", "remission", "at", "route", "rooms", "cells"):
+        assert k in st, "状态行缺字段 %s" % k
+    assert set(st["rooms"]) == set(ROOMS)
 
     g2 = Game("晚期", seed=7)
     g2.antibody = 12
@@ -539,6 +757,8 @@ def run_fuzz(times=50):
     """模糊测试：随机输入乱打，只断言"不崩、不无限循环、状态不越界"。"""
     print(f"[fuzz] {times} 局随机输入")
     actions = ["1", "2", "3", "3 5", "4", "5", "", "??", "1", "2"]
+    # v4 新动作也要进模糊测试：前进/地图/地形不该把状态打坏
+    actions += ["6", "7", "8", "前进", "地图", "地形"]
     cells = list(CELLS)
     drugs = list(DRUGS)
     bad = 0
@@ -554,6 +774,12 @@ def run_fuzz(times=50):
                     name = random.choice(drugs)
                     g.drugs[name] = g.drugs.get(name, 0) + 1
                     g.use_drug(name, random.choice(ROOMS))
+                elif a in ("6", "前进"):
+                    g.at = ROUTE[(ROUTE.index(g.at) + 1) % len(ROUTE)]
+                elif a in ("7", "地图"):
+                    g.map_view()
+                elif a == "8":
+                    assert TERRAIN[g.at]["note"]
                 elif a.startswith("3"):
                     if g.tick() != "ok":
                         break
@@ -561,6 +787,8 @@ def run_fuzz(times=50):
                     break
                 assert g.antibody >= 0 and g.remission >= 0
                 assert 0 <= g.lives <= START_LIVES
+                assert g.at in TERRAIN, "驻扎点必须始终是已知区域"
+                assert g.terrain_turns >= 0
                 for r in g.rooms.values():
                     assert 0 <= r["favor"] <= 100, "好感越界"
                     assert 0 <= r["fall"] <= 100, "沦陷越界"
@@ -579,6 +807,8 @@ def main(argv=None):
     ap.add_argument("--save", default=None, help="存档路径（每 5 回合与结束时写入）")
     ap.add_argument("--load", default=None, help="从存档继续")
     ap.add_argument("--seed", type=int, default=None, help="固定随机种子（可复现）")
+    ap.add_argument("--state", action="store_true",
+                    help="每回合多打一行 @@STATE {...}@@（网页画人体地图用）")
     args = ap.parse_args(argv)
 
     if args.selftest or selftest_mode():
@@ -607,6 +837,8 @@ def main(argv=None):
         keys = list(MODES)
         mode = keys[int(pick) - 1] if pick.isdigit() and 1 <= int(pick) <= len(keys) else "20岁"
         g = Game(mode, seed=args.seed)
+    if args.state:
+        g.state_line = True
     g.play(save_path=args.save)
     return 0
 
